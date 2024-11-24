@@ -8,7 +8,7 @@
  * @author    Andy Prevost
  * @copyright 2012 - 2020 Marcus Bointon
  * @copyright 2004 - 2009 Andy Prevost
- * @license   http://www.gnu.org/copyleft/lesser.html GNU Lesser General Public License
+ * @license   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html GNU Lesser General Public License
  */
 
 namespace PHPMailer\Test\PHPMailer;
@@ -23,6 +23,8 @@ use PHPMailer\Test\SendTestCase;
  */
 final class PHPMailerTest extends SendTestCase
 {
+    private $Smtp;
+
     /**
      * Test low priority.
      */
@@ -470,7 +472,7 @@ EOT;
         //Make sure phar paths are rejected
         self::assertFalse($this->Mail->addAttachment('phar://pharfile.php', 'pharfile.php'));
         //Make sure any path that looks URLish is rejected
-        self::assertFalse($this->Mail->addAttachment('http://example.com/test.php', 'test.php'));
+        self::assertFalse($this->Mail->addAttachment('https://example.com/test.php', 'test.php'));
         self::assertFalse(
             $this->Mail->addAttachment(
                 'ssh2.sftp://user:pass@attacker-controlled.example.com:22/tmp/payload.phar',
@@ -745,6 +747,12 @@ EOT;
         self::assertFalse($this->Mail->addAddress('', 'Nobody'), 'Empty address with name accepted');
         self::assertFalse($this->Mail->addAddress('a@example..com'), 'Invalid address accepted');
         self::assertTrue($this->Mail->addAddress('a@example.com'), 'Addressing failed');
+        self::assertTrue($this->Mail->addAddress('nullname@example.com', null), 'Null name not ignored');
+        self::assertTrue(
+            $this->Mail->addAddress('objectname@example.com', new \stdClass()),
+            'Object as name not ignored'
+        );
+        self::assertTrue($this->Mail->addAddress('arrayname@example.com', [1,2,3]), 'Array as name not ignored');
         self::assertFalse($this->Mail->addAddress('a@example.com'), 'Duplicate addressing failed');
         self::assertTrue($this->Mail->addCC('b@example.com'), 'CC addressing failed');
         self::assertFalse($this->Mail->addCC('b@example.com'), 'CC duplicate addressing failed');
@@ -797,8 +805,7 @@ EOT;
         $this->buildBody();
         $this->Mail->preSend();
         self::assertMatchesRegularExpression(
-            "/Content-Transfer-Encoding: 8bit\r\n\r\n" .
-            'This is a multi-part message in MIME format./',
+            "/Content-Transfer-Encoding: 8bit\r\n\r\n/",
             $this->Mail->getSentMIMEMessage(),
             'MIME structure broken'
         );
@@ -813,11 +820,10 @@ EOT;
         $this->Mail->Subject .= ': BCC-only addressing';
         $this->buildBody();
         $this->Mail->clearAllRecipients();
-        $this->Mail->addAddress('foo@example.com', 'Foo');
+        self::assertTrue($this->Mail->addBCC('a@example.com'), 'BCC addressing failed');
         $this->Mail->preSend();
         $b = $this->Mail->getSentMIMEMessage();
-        self::assertTrue($this->Mail->addBCC('a@example.com'), 'BCC addressing failed');
-        self::assertStringContainsString('To: Foo <foo@example.com>', $b);
+        self::assertStringNotContainsString('a@example.com', $b);
         self::assertTrue($this->Mail->send(), 'send failed');
     }
 
@@ -831,6 +837,20 @@ EOT;
         $mail = new PHPMailer(true);
         $mail->addAttachment(__FILE__, 'test.txt', 'invalidencoding');
     }
+
+    /**
+     * Expect errors on trying to attach a folder as an attachment
+     */
+    public function testAddFolderAsAttachment()
+    {
+        $mail = new PHPMailer();
+        self::assertFalse($mail->addAttachment(__DIR__, 'test.txt'));
+
+        $this->expectException(Exception::class);
+        $mail = new PHPMailer(true);
+        $mail->addAttachment(__DIR__, 'test.txt');
+    }
+
 
     /**
      * Expect exceptions on sending after deleting a previously successfully attached file
@@ -1051,6 +1071,7 @@ EOT;
         $this->Mail->isSendmail();
         $this->Mail->isQmail();
         $this->Mail->Sender = '';
+        self::assertEmpty($this->Mail->Sender);
         $this->Mail->createHeader();
     }
 
@@ -1105,7 +1126,8 @@ EOT;
 
         $this->Mail->clearAllRecipients();
 
-        //This file is UTF-8 encoded. Create a domain encoded in "iso-8859-1".
+        //This file is UTF-8 encoded so we have to take a roundabout route
+        //to make a domain using an ISO-8859-1 character.
         $letter = html_entity_decode('&ccedil;', ENT_COMPAT, PHPMailer::CHARSET_ISO88591);
         $domain = '@' . 'fran' . $letter . 'ois.ch';
         $this->Mail->addAddress('test' . $domain);
@@ -1171,6 +1193,35 @@ EOT;
     }
 
     /**
+     * Test SMTP Xclient options
+     */
+    public function testSmtpXclient()
+    {
+        $this->Mail->isSMTP();
+        $this->Mail->SMTPAuth = false;
+        $this->Mail->setSMTPXclientAttribute('ADDR', '127.0.0.1');
+        $this->Mail->setSMTPXclientAttribute('LOGIN', 'user@example.com');
+        $this->Mail->setSMTPXclientAttribute('HELO', 'test.example.com');
+        $this->assertFalse($this->Mail->setSMTPXclientAttribute('INVALID', 'value'));
+
+        $attributes = $this->Mail->getSMTPXclientAttributes();
+        $this->assertEquals('test.example.com', $attributes['HELO']);
+
+        // remove attribute
+        $this->Mail->setSMTPXclientAttribute('HELO', null);
+        $attributes = $this->Mail->getSMTPXclientAttributes();
+        $this->assertEquals(['ADDR' => '127.0.0.1', 'LOGIN' => 'user@example.com'], $attributes);
+
+        $this->Mail->Subject .= ': Testing XCLIENT';
+        $this->buildBody();
+        $this->Mail->clearAllRecipients();
+        self::assertTrue($this->Mail->addAddress('a@example.com'), 'Addressing failed');
+        $this->Mail->preSend();
+        self::assertTrue($this->Mail->send(), 'send failed');
+    }
+
+
+    /**
      * Test SMTP host connections.
      * This test can take a long time, so run it last.
      *
@@ -1208,13 +1259,12 @@ EOT;
         $this->Mail->smtpClose();
     }
 
+    /**
+     * @requires extension mbstring
+     * @requires function idn_to_ascii
+     */
     public function testGivenIdnAddress_addAddress_returns_true()
     {
-        if (file_exists(\PHPMAILER_INCLUDE_DIR . '/test/fakefunctions.php') === false) {
-            $this->markTestSkipped('/test/fakefunctions.php file not found');
-        }
-
-        include \PHPMAILER_INCLUDE_DIR . '/test/fakefunctions.php';
         $this->assertTrue($this->Mail->addAddress('test@françois.ch'));
     }
 
